@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Temporary Site Connector
  * Description: Temporary admin-only WordPress diagnostics connector for remote debugging.
- * Version: 1.4.2
+ * Version: 1.5.0
  * Author: Codex
  * License: GPL-2.0-or-later
  * Requires PHP: 7.2
@@ -134,6 +134,7 @@ final class WP_CLI_Setup_Helper {
 			'/cron'        => array( __CLASS__, 'rest_cron' ),
 			'/transients'  => array( __CLASS__, 'rest_transients' ),
 			'/debug-log'   => array( __CLASS__, 'rest_debug_log' ),
+			'/snapshot'    => array( __CLASS__, 'rest_snapshot' ),
 			'/commands'    => array( __CLASS__, 'rest_commands' ),
 		);
 
@@ -267,15 +268,15 @@ final class WP_CLI_Setup_Helper {
 	public static function rest_debug_log( WP_REST_Request $request ): WP_REST_Response {
 		$lines = absint( $request->get_param( 'lines' ) );
 
-		if ( $lines < 1 ) {
-			$lines = 200;
-		}
-
-		if ( $lines > 1000 ) {
-			$lines = 1000;
-		}
+		$lines = self::normalize_lines_limit( $lines, 200 );
 
 		return rest_ensure_response( self::get_debug_log_report( $lines ) );
+	}
+
+	public static function rest_snapshot( WP_REST_Request $request ): WP_REST_Response {
+		$lines = self::normalize_lines_limit( absint( $request->get_param( 'lines' ) ), 300 );
+
+		return rest_ensure_response( self::get_snapshot_report( $lines ) );
 	}
 
 	public static function rest_commands(): WP_REST_Response {
@@ -371,6 +372,8 @@ final class WP_CLI_Setup_Helper {
 
 			<?php self::render_connector_tools( isset( $post_result['connector'] ) ? $post_result['connector'] : array() ); ?>
 
+			<?php self::render_issue_snapshot(); ?>
+
 			<?php self::render_debug_tools(); ?>
 
 			<?php self::render_cleanup_status(); ?>
@@ -429,6 +432,10 @@ final class WP_CLI_Setup_Helper {
 				width: 100%;
 			}
 
+			.wp-cli-helper-code.is-small {
+				min-height: 70px;
+			}
+
 			.wp-cli-helper-code-header {
 				align-items: center;
 				display: flex;
@@ -453,6 +460,68 @@ final class WP_CLI_Setup_Helper {
 			.wp-cli-helper-secret-warning {
 				color: #8a2424;
 				font-weight: 600;
+			}
+
+			.wp-cli-helper-count-grid {
+				display: grid;
+				gap: 8px;
+				grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+				margin: 14px 0;
+			}
+
+			.wp-cli-helper-count-card {
+				background: #f6f7f7;
+				border: 1px solid #dcdcde;
+				padding: 10px;
+			}
+
+			.wp-cli-helper-count-card span,
+			.wp-cli-helper-list-item span {
+				color: #646970;
+				display: block;
+				font-size: 12px;
+			}
+
+			.wp-cli-helper-count-card strong {
+				display: block;
+				font-size: 20px;
+				margin-top: 4px;
+			}
+
+			.wp-cli-helper-list-summary {
+				border-top: 1px solid #dcdcde;
+				margin-top: 14px;
+				padding-top: 12px;
+			}
+
+			.wp-cli-helper-list-summary h3 {
+				margin: 0 0 8px;
+			}
+
+			.wp-cli-helper-list-summary details {
+				margin-top: 8px;
+			}
+
+			.wp-cli-helper-list-summary summary {
+				cursor: pointer;
+				font-weight: 600;
+				margin: 8px 0;
+			}
+
+			.wp-cli-helper-list-item {
+				align-items: center;
+				border: 1px solid #dcdcde;
+				display: grid;
+				gap: 6px;
+				grid-template-columns: minmax(160px, 1fr) 80px 110px minmax(180px, 1.2fr);
+				margin: 6px 0;
+				padding: 8px;
+			}
+
+			@media (max-width: 782px) {
+				.wp-cli-helper-list-item {
+					grid-template-columns: 1fr;
+				}
 			}
 		</style>
 
@@ -486,6 +555,25 @@ final class WP_CLI_Setup_Helper {
 						target.setSelectionRange(0, target.value.length);
 
 						copyText(target.value, target);
+					});
+				});
+
+				document.querySelectorAll('[data-wp-cli-helper-download-json]').forEach(function (button) {
+					button.addEventListener('click', function () {
+						var target = document.getElementById(button.getAttribute('data-wp-cli-helper-download-json'));
+
+						if (!target || !target.value) {
+							return;
+						}
+
+						var blob = new Blob([target.value], { type: 'application/json' });
+						var link = document.createElement('a');
+						link.href = window.URL.createObjectURL(blob);
+						link.download = button.getAttribute('data-filename') || 'temporary-site-connector-snapshot.json';
+						document.body.appendChild(link);
+						link.click();
+						document.body.removeChild(link);
+						window.URL.revokeObjectURL(link.href);
 					});
 				});
 
@@ -565,6 +653,9 @@ final class WP_CLI_Setup_Helper {
 	}
 
 	private static function render_info_table( array $diagnostics ): void {
+		$plugins = isset( $diagnostics['plugins'] ) && is_array( $diagnostics['plugins'] ) ? $diagnostics['plugins'] : array();
+		$themes = isset( $diagnostics['themes'] ) && is_array( $diagnostics['themes'] ) ? $diagnostics['themes'] : array();
+		$content_counts = isset( $diagnostics['content_counts'] ) && is_array( $diagnostics['content_counts'] ) ? $diagnostics['content_counts'] : array();
 		?>
 		<div class="wp-cli-helper-card">
 			<h2><?php echo esc_html__( 'Detected Site Info', 'wp-cli-setup-helper' ); ?></h2>
@@ -578,8 +669,78 @@ final class WP_CLI_Setup_Helper {
 					<?php endforeach; ?>
 				</tbody>
 			</table>
+			<?php self::render_count_cards( $content_counts ); ?>
+			<?php self::render_collapsible_list( __( 'Installed Plugins', 'wp-cli-setup-helper' ), $plugins, 'plugin' ); ?>
+			<?php self::render_collapsible_list( __( 'Installed Themes', 'wp-cli-setup-helper' ), $themes, 'theme' ); ?>
 		</div>
 
+		<?php
+	}
+
+	private static function render_count_cards( array $counts ): void {
+		if ( empty( $counts ) ) {
+			return;
+		}
+
+		?>
+		<div class="wp-cli-helper-count-grid">
+			<?php foreach ( $counts as $label => $count ) : ?>
+				<div class="wp-cli-helper-count-card">
+					<span><?php echo esc_html( $label ); ?></span>
+					<strong><?php echo esc_html( number_format_i18n( absint( $count ) ) ); ?></strong>
+				</div>
+			<?php endforeach; ?>
+		</div>
+		<?php
+	}
+
+	private static function render_collapsible_list( string $title, array $items, string $type ): void {
+		if ( empty( $items ) ) {
+			return;
+		}
+
+		$first = reset( $items );
+		$remaining = array_slice( $items, 1 );
+		?>
+		<div class="wp-cli-helper-list-summary">
+			<h3><?php echo esc_html( sprintf( '%s (%d)', $title, count( $items ) ) ); ?></h3>
+			<?php self::render_list_item( is_array( $first ) ? $first : array(), $type ); ?>
+			<?php if ( ! empty( $remaining ) ) : ?>
+				<details>
+					<summary><?php echo esc_html( sprintf( __( 'Show %d more', 'wp-cli-setup-helper' ), count( $remaining ) ) ); ?></summary>
+					<?php foreach ( $remaining as $item ) : ?>
+						<?php self::render_list_item( is_array( $item ) ? $item : array(), $type ); ?>
+					<?php endforeach; ?>
+				</details>
+			<?php endif; ?>
+		</div>
+		<?php
+	}
+
+	private static function render_list_item( array $item, string $type ): void {
+		$name = isset( $item['name'] ) ? (string) $item['name'] : '';
+		$version = isset( $item['version'] ) ? (string) $item['version'] : '';
+		$status = '';
+
+		if ( 'plugin' === $type ) {
+			$status = ! empty( $item['is_active'] ) || ! empty( $item['network_active'] ) ? 'Active' : 'Inactive';
+		} elseif ( 'theme' === $type ) {
+			$status = ! empty( $item['is_active'] ) ? 'Active' : 'Inactive';
+		}
+
+		?>
+		<div class="wp-cli-helper-list-item">
+			<strong><?php echo esc_html( $name ? $name : __( 'Unknown', 'wp-cli-setup-helper' ) ); ?></strong>
+			<span><?php echo esc_html( $version ? 'v' . $version : '' ); ?></span>
+			<?php if ( $status ) : ?>
+				<?php self::render_status_badge( 'Active' === $status, $status ); ?>
+			<?php endif; ?>
+			<?php if ( ! empty( $item['file'] ) ) : ?>
+				<code><?php echo esc_html( (string) $item['file'] ); ?></code>
+			<?php elseif ( ! empty( $item['stylesheet'] ) ) : ?>
+				<code><?php echo esc_html( (string) $item['stylesheet'] ); ?></code>
+			<?php endif; ?>
+		</div>
 		<?php
 	}
 
@@ -724,12 +885,43 @@ final class WP_CLI_Setup_Helper {
 		<?php
 	}
 
+	private static function render_issue_snapshot(): void {
+		$base             = untrailingslashit( rest_url( self::REST_NAMESPACE ) );
+		$snapshot_command = 'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/snapshot?lines=300' );
+		$snapshot_json    = wp_json_encode( self::get_snapshot_report( 150 ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
+
+		if ( ! is_string( $snapshot_json ) ) {
+			$snapshot_json = '{}';
+		}
+
+		?>
+		<div class="wp-cli-helper-card">
+			<h2><?php echo esc_html__( 'Issue Snapshot', 'wp-cli-setup-helper' ); ?></h2>
+			<p><?php echo esc_html__( 'Copy or download one read-only debug report for Codex: diagnostics, REST health, recent errors, plugins, theme, Elementor, and Directorist context.', 'wp-cli-setup-helper' ); ?></p>
+			<div class="wp-cli-helper-inline-actions">
+				<button type="button" class="button button-secondary" data-wp-cli-helper-copy="wp-cli-helper-snapshot-command">
+					<?php echo esc_html__( 'Copy Snapshot Command', 'wp-cli-setup-helper' ); ?>
+				</button>
+				<button type="button" class="button button-secondary" data-wp-cli-helper-copy="wp-cli-helper-snapshot-json">
+					<?php echo esc_html__( 'Copy JSON', 'wp-cli-setup-helper' ); ?>
+				</button>
+				<button type="button" class="button button-secondary" data-wp-cli-helper-download-json="wp-cli-helper-snapshot-json" data-filename="temporary-site-connector-snapshot.json">
+					<?php echo esc_html__( 'Download JSON', 'wp-cli-setup-helper' ); ?>
+				</button>
+			</div>
+			<textarea id="wp-cli-helper-snapshot-command" class="wp-cli-helper-code is-small" rows="2" readonly><?php echo esc_textarea( $snapshot_command ); ?></textarea>
+			<details>
+				<summary><?php echo esc_html__( 'Preview snapshot JSON', 'wp-cli-setup-helper' ); ?></summary>
+				<textarea id="wp-cli-helper-snapshot-json" class="wp-cli-helper-code" rows="12" readonly><?php echo esc_textarea( $snapshot_json ); ?></textarea>
+			</details>
+		</div>
+		<?php
+	}
+
 	private static function render_debug_tools(): void {
 		$status = self::get_debug_config_status();
-		$button_disabled = ! $status['writable'] || ( $status['active'] && ! $status['owned'] );
-		$action = $status['owned'] ? self::DEBUG_DISABLE_ACTION : self::DEBUG_ENABLE_ACTION;
-		$nonce_action = $status['owned'] ? self::DEBUG_DISABLE_ACTION : self::DEBUG_ENABLE_ACTION;
-		$button_label = $status['owned'] ? __( 'Disable debug logging', 'wp-cli-setup-helper' ) : __( 'Enable debug logging', 'wp-cli-setup-helper' );
+		$enable_disabled = ! $status['writable'] || $status['owned'] || $status['active'];
+		$disable_disabled = ! $status['writable'] || ! $status['owned'];
 		$status_message = '';
 
 		if ( $status['owned'] ) {
@@ -764,11 +956,18 @@ final class WP_CLI_Setup_Helper {
 					</tr>
 				</tbody>
 			</table>
-			<form method="post" action="" class="wp-cli-helper-actions">
-				<input type="hidden" name="wp_cli_helper_action" value="<?php echo esc_attr( $action ); ?>" />
-				<?php wp_nonce_field( $nonce_action ); ?>
-				<?php submit_button( $status['active'] && ! $status['owned'] ? __( 'Debug already enabled', 'wp-cli-setup-helper' ) : $button_label, $status['owned'] ? 'delete' : 'secondary', 'submit', false, $button_disabled ? array( 'disabled' => 'disabled' ) : array() ); ?>
-			</form>
+			<div class="wp-cli-helper-inline-actions">
+				<form method="post" action="">
+					<input type="hidden" name="wp_cli_helper_action" value="<?php echo esc_attr( self::DEBUG_ENABLE_ACTION ); ?>" />
+					<?php wp_nonce_field( self::DEBUG_ENABLE_ACTION ); ?>
+					<?php submit_button( $status['active'] && ! $status['owned'] ? __( 'Debug already enabled', 'wp-cli-setup-helper' ) : __( 'Enable debug logging', 'wp-cli-setup-helper' ), 'secondary', 'submit', false, $enable_disabled ? array( 'disabled' => 'disabled' ) : array() ); ?>
+				</form>
+				<form method="post" action="">
+					<input type="hidden" name="wp_cli_helper_action" value="<?php echo esc_attr( self::DEBUG_DISABLE_ACTION ); ?>" />
+					<?php wp_nonce_field( self::DEBUG_DISABLE_ACTION ); ?>
+					<?php submit_button( $status['owned'] ? __( 'Disable debug logging', 'wp-cli-setup-helper' ) : __( 'Disable unavailable', 'wp-cli-setup-helper' ), 'delete', 'submit', false, $disable_disabled ? array( 'disabled' => 'disabled' ) : array() ); ?>
+				</form>
+			</div>
 		</div>
 		<?php
 	}
@@ -1002,6 +1201,7 @@ final class WP_CLI_Setup_Helper {
 				'curl -u ' . self::shell_quote( $auth ) . ' ' . self::shell_quote( $base . '/health' ),
 				'',
 				'# Pull site context.',
+				'curl -u ' . self::shell_quote( $auth ) . ' ' . self::shell_quote( $base . '/snapshot?lines=300' ),
 				'curl -u ' . self::shell_quote( $auth ) . ' ' . self::shell_quote( $base . '/context' ),
 				'curl -u ' . self::shell_quote( $auth ) . ' ' . self::shell_quote( $base . '/diagnostics' ),
 				'curl -u ' . self::shell_quote( $auth ) . ' ' . self::shell_quote( $base . '/plugins' ),
@@ -1306,6 +1506,9 @@ final class WP_CLI_Setup_Helper {
 		$wp_root     = self::normalize_path( ABSPATH );
 		$environment = function_exists( 'wp_get_environment_type' ) ? wp_get_environment_type() : 'unknown';
 		$debug_log   = self::get_debug_log_path();
+		$plugins_report = self::get_plugins_report();
+		$theme_report = self::get_theme_report();
+		$content_counts = self::get_content_counts();
 
 		return array(
 			'wp_root'        => $wp_root,
@@ -1327,7 +1530,17 @@ final class WP_CLI_Setup_Helper {
 				'PHP_OS'                  => PHP_OS,
 				'REST base'               => esc_url_raw( rest_url( self::REST_NAMESPACE ) ),
 				'Debug log path'          => $debug_log,
+				'Installed plugins'       => isset( $plugins_report['count'] ) ? (string) $plugins_report['count'] : '0',
+				'Active plugins'          => isset( $plugins_report['active'] ) ? (string) $plugins_report['active'] : '0',
+				'Installed themes'        => isset( $theme_report['installed'] ) && is_array( $theme_report['installed'] ) ? (string) count( $theme_report['installed'] ) : '0',
+				'Total posts'             => isset( $content_counts['Posts'] ) ? (string) $content_counts['Posts'] : '0',
+				'Total pages'             => isset( $content_counts['Pages'] ) ? (string) $content_counts['Pages'] : '0',
+				'Total categories'        => isset( $content_counts['Categories'] ) ? (string) $content_counts['Categories'] : '0',
+				'Total locations'         => isset( $content_counts['Locations'] ) ? (string) $content_counts['Locations'] : '0',
 			),
+			'plugins'        => isset( $plugins_report['plugins'] ) && is_array( $plugins_report['plugins'] ) ? $plugins_report['plugins'] : array(),
+			'themes'         => isset( $theme_report['installed'] ) && is_array( $theme_report['installed'] ) ? $theme_report['installed'] : array(),
+			'content_counts' => $content_counts,
 			'writable_paths' => array(
 				'WordPress root' => array(
 					'path'     => $wp_root,
@@ -1421,6 +1634,131 @@ final class WP_CLI_Setup_Helper {
 			'installed'   => $installed,
 			'generated_at' => current_time( 'mysql' ),
 		);
+	}
+
+	private static function get_content_counts(): array {
+		$counts = array(
+			'Posts'      => self::count_post_type( 'post' ),
+			'Pages'      => self::count_post_type( 'page' ),
+			'Categories' => self::count_taxonomy_terms( 'category' ),
+			'Locations'  => self::count_first_existing_taxonomy(
+				array(
+					'at_biz_dir-location',
+					'at_biz_dir-location-category',
+					'location',
+					'locations',
+				)
+			),
+			'Listings'   => self::count_first_existing_post_type(
+				array(
+					'at_biz_dir',
+					'directory_listing',
+					'listing',
+					'listings',
+				)
+			),
+		);
+
+		return $counts;
+	}
+
+	private static function count_post_type( string $post_type ): int {
+		if ( ! post_type_exists( $post_type ) ) {
+			return 0;
+		}
+
+		$counts = wp_count_posts( $post_type );
+
+		if ( ! $counts ) {
+			return 0;
+		}
+
+		return array_sum(
+			array_map(
+				'absint',
+				(array) $counts
+			)
+		);
+	}
+
+	private static function count_taxonomy_terms( string $taxonomy ): int {
+		if ( ! taxonomy_exists( $taxonomy ) ) {
+			return 0;
+		}
+
+		$count = wp_count_terms(
+			array(
+				'taxonomy'   => $taxonomy,
+				'hide_empty' => false,
+			)
+		);
+
+		return is_wp_error( $count ) ? 0 : absint( $count );
+	}
+
+	private static function count_first_existing_taxonomy( array $taxonomies ): int {
+		foreach ( $taxonomies as $taxonomy ) {
+			if ( taxonomy_exists( $taxonomy ) ) {
+				return self::count_taxonomy_terms( $taxonomy );
+			}
+		}
+
+		return 0;
+	}
+
+	private static function count_first_existing_post_type( array $post_types ): int {
+		foreach ( $post_types as $post_type ) {
+			if ( post_type_exists( $post_type ) ) {
+				return self::count_post_type( $post_type );
+			}
+		}
+
+		return 0;
+	}
+
+	private static function first_existing_post_type( array $post_types ): string {
+		foreach ( $post_types as $post_type ) {
+			if ( post_type_exists( $post_type ) ) {
+				return $post_type;
+			}
+		}
+
+		return '';
+	}
+
+	private static function first_existing_taxonomy( array $taxonomies ): string {
+		foreach ( $taxonomies as $taxonomy ) {
+			if ( taxonomy_exists( $taxonomy ) ) {
+				return $taxonomy;
+			}
+		}
+
+		return '';
+	}
+
+	private static function count_post_type_by_status( string $post_type ): array {
+		if ( ! post_type_exists( $post_type ) ) {
+			return array();
+		}
+
+		$counts = wp_count_posts( $post_type );
+
+		if ( ! $counts ) {
+			return array();
+		}
+
+		$result = array();
+		$total  = 0;
+
+		foreach ( get_object_vars( $counts ) as $status => $count ) {
+			$count = absint( $count );
+			$result[ $status ] = $count;
+			$total += $count;
+		}
+
+		$result['total'] = $total;
+
+		return $result;
 	}
 
 	private static function get_options_report(): array {
@@ -1588,6 +1926,295 @@ final class WP_CLI_Setup_Helper {
 		);
 	}
 
+	private static function get_snapshot_report( int $lines = 300 ): array {
+		$lines       = self::normalize_lines_limit( $lines, 300 );
+		$diagnostics = self::get_diagnostics();
+		$debug_log   = self::get_debug_log_report( $lines );
+
+		return array(
+			'identity'        => array(
+				'plugin'      => 'temporary-site-connector',
+				'version'     => self::plugin_version(),
+				'site_url'    => site_url(),
+				'home_url'    => home_url(),
+				'user_id'     => get_current_user_id(),
+				'read_only'   => true,
+			),
+			'diagnostics'     => $diagnostics,
+			'plugins'         => self::get_plugins_report(),
+			'theme'           => self::get_theme_report(),
+			'options'         => self::get_options_report(),
+			'content_counts'  => isset( $diagnostics['content_counts'] ) ? $diagnostics['content_counts'] : array(),
+			'rest_health'     => self::get_rest_health_report( $debug_log ),
+			'recent_errors'   => self::get_recent_error_summary( $debug_log ),
+			'debug_log_tail'  => array(
+				'readable'   => ! empty( $debug_log['readable'] ),
+				'path'       => isset( $debug_log['path'] ) ? $debug_log['path'] : '',
+				'size_bytes' => isset( $debug_log['size_bytes'] ) ? absint( $debug_log['size_bytes'] ) : 0,
+				'line_count' => isset( $debug_log['lines'] ) && is_array( $debug_log['lines'] ) ? count( $debug_log['lines'] ) : 0,
+				'lines'      => isset( $debug_log['lines'] ) && is_array( $debug_log['lines'] ) ? $debug_log['lines'] : array(),
+			),
+			'elementor'       => self::get_elementor_snapshot(),
+			'directorist'     => self::get_directorist_snapshot(),
+			'safety'          => array(
+				'read_only'       => true,
+				'shell_execution' => false,
+				'sql_execution'   => false,
+				'file_editor'     => false,
+				'plugin_actions'  => false,
+			),
+			'generated_at'    => current_time( 'mysql' ),
+		);
+	}
+
+	private static function get_rest_health_report( array $debug_log ): array {
+		$home_url = home_url();
+		$site_url = site_url();
+		$rest_url = rest_url();
+
+		$rest_response = wp_remote_get(
+			$rest_url,
+			array(
+				'timeout'     => 4,
+				'redirection' => 3,
+				'sslverify'   => apply_filters( 'https_local_ssl_verify', false ),
+			)
+		);
+
+		$loopback_response = wp_remote_get(
+			add_query_arg( 'temporary-site-connector-loopback', '1', home_url( '/' ) ),
+			array(
+				'timeout'     => 4,
+				'redirection' => 3,
+				'sslverify'   => apply_filters( 'https_local_ssl_verify', false ),
+			)
+		);
+
+		return array(
+			'rest_base'                       => $rest_url,
+			'rest_reachable'                  => ! is_wp_error( $rest_response ),
+			'rest_status'                     => is_wp_error( $rest_response ) ? $rest_response->get_error_message() : wp_remote_retrieve_response_code( $rest_response ),
+			'loopback_reachable'              => ! is_wp_error( $loopback_response ),
+			'loopback_status'                 => is_wp_error( $loopback_response ) ? $loopback_response->get_error_message() : wp_remote_retrieve_response_code( $loopback_response ),
+			'authorization_header_visible'    => self::authorization_header_visible(),
+			'application_passwords_available' => function_exists( 'wp_is_application_passwords_available' ) ? wp_is_application_passwords_available() : false,
+			'home_site_url_match'             => untrailingslashit( $home_url ) === untrailingslashit( $site_url ),
+			'home_scheme'                     => wp_parse_url( $home_url, PHP_URL_SCHEME ),
+			'site_scheme'                     => wp_parse_url( $site_url, PHP_URL_SCHEME ),
+			'request_is_ssl'                  => is_ssl(),
+			'permalink_structure'             => (string) get_option( 'permalink_structure', '' ),
+			'debug_log_readable'              => ! empty( $debug_log['readable'] ),
+			'debug_log_path'                  => isset( $debug_log['path'] ) ? $debug_log['path'] : self::get_debug_log_path(),
+			'generated_at'                    => current_time( 'mysql' ),
+		);
+	}
+
+	private static function authorization_header_visible(): bool {
+		$server_keys = array(
+			'HTTP_AUTHORIZATION',
+			'REDIRECT_HTTP_AUTHORIZATION',
+			'PHP_AUTH_USER',
+			'PHP_AUTH_PW',
+		);
+
+		foreach ( $server_keys as $key ) {
+			if ( ! empty( $_SERVER[ $key ] ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static function get_recent_error_summary( array $debug_log ): array {
+		$groups = array(
+			'fatal'      => array(),
+			'error'      => array(),
+			'warning'    => array(),
+			'deprecated' => array(),
+			'notice'     => array(),
+		);
+		$counts = array(
+			'fatal'      => 0,
+			'error'      => 0,
+			'warning'    => 0,
+			'deprecated' => 0,
+			'notice'     => 0,
+		);
+
+		if ( empty( $debug_log['readable'] ) || empty( $debug_log['lines'] ) || ! is_array( $debug_log['lines'] ) ) {
+			return array(
+				'available'    => false,
+				'counts'       => $counts,
+				'groups'       => $groups,
+				'message'      => isset( $debug_log['message'] ) ? $debug_log['message'] : 'Debug log is unavailable.',
+				'generated_at' => current_time( 'mysql' ),
+			);
+		}
+
+		foreach ( array_reverse( $debug_log['lines'] ) as $line ) {
+			$entry = self::parse_debug_log_entry( (string) $line );
+
+			if ( empty( $entry['type'] ) || ! isset( $groups[ $entry['type'] ] ) ) {
+				continue;
+			}
+
+			$type = $entry['type'];
+			$key  = md5( $type . '|' . $entry['message'] );
+			$counts[ $type ]++;
+
+			if ( ! isset( $groups[ $type ][ $key ] ) ) {
+				if ( count( $groups[ $type ] ) >= 10 ) {
+					continue;
+				}
+
+				$groups[ $type ][ $key ] = array(
+					'type'             => $type,
+					'latest_timestamp' => $entry['timestamp'],
+					'message'          => $entry['message'],
+					'count'            => 0,
+				);
+			}
+
+			$groups[ $type ][ $key ]['count']++;
+		}
+
+		foreach ( $groups as $type => $items ) {
+			$groups[ $type ] = array_values( $items );
+		}
+
+		return array(
+			'available'    => true,
+			'counts'       => $counts,
+			'groups'       => $groups,
+			'generated_at' => current_time( 'mysql' ),
+		);
+	}
+
+	private static function parse_debug_log_entry( string $line ): array {
+		$timestamp = '';
+		$message   = trim( $line );
+
+		if ( preg_match( '/^\[([^\]]+)\]\s*(.*)$/', $message, $matches ) ) {
+			$timestamp = trim( $matches[1] );
+			$message   = trim( $matches[2] );
+		}
+
+		return array(
+			'type'      => self::classify_debug_log_line( $message ),
+			'timestamp' => $timestamp,
+			'message'   => self::truncate_text( preg_replace( '/\s+/', ' ', $message ), 500 ),
+		);
+	}
+
+	private static function classify_debug_log_line( string $line ): string {
+		if ( preg_match( '/\b(fatal error|parse error|recoverable fatal error|uncaught)\b/i', $line ) ) {
+			return 'fatal';
+		}
+
+		if ( preg_match( '/\bdeprecated\b/i', $line ) ) {
+			return 'deprecated';
+		}
+
+		if ( preg_match( '/\bwarning\b/i', $line ) ) {
+			return 'warning';
+		}
+
+		if ( preg_match( '/\bnotice\b/i', $line ) ) {
+			return 'notice';
+		}
+
+		if ( preg_match( '/\berror\b/i', $line ) ) {
+			return 'error';
+		}
+
+		return '';
+	}
+
+	private static function get_elementor_snapshot(): array {
+		$version     = defined( 'ELEMENTOR_VERSION' ) ? ELEMENTOR_VERSION : self::get_plugin_version_from_files( array( 'elementor/elementor.php' ) );
+		$pro_version = defined( 'ELEMENTOR_PRO_VERSION' ) ? ELEMENTOR_PRO_VERSION : self::get_plugin_version_from_files( array( 'elementor-pro/elementor-pro.php' ) );
+		$available   = '' !== $version || '' !== $pro_version || class_exists( 'Elementor\\Plugin' );
+		$uploads     = wp_upload_dir( null, false );
+		$css_dir     = isset( $uploads['basedir'] ) ? trailingslashit( $uploads['basedir'] ) . 'elementor/css' : '';
+
+		if ( ! $available ) {
+			return array(
+				'available'    => false,
+				'generated_at' => current_time( 'mysql' ),
+			);
+		}
+
+		return array(
+			'available'            => $available,
+			'version'              => $version,
+			'pro_version'          => $pro_version,
+			'active_kit_id'        => absint( get_option( 'elementor_active_kit', 0 ) ),
+			'css_path'             => $css_dir ? self::normalize_path( $css_dir ) : '',
+			'css_path_exists'      => $css_dir ? is_dir( $css_dir ) : false,
+			'css_path_writable'    => $css_dir ? ( is_dir( $css_dir ) ? is_writable( $css_dir ) : is_writable( dirname( $css_dir ) ) ) : false,
+			'experiments'          => self::get_options_by_prefix( 'elementor_experiment-', 30 ),
+			'selected_options'     => self::get_existing_options_snapshot(
+				array(
+					'elementor_version',
+					'elementor_pro_version',
+					'elementor_cpt_support',
+					'elementor_disable_color_schemes',
+					'elementor_disable_typography_schemes',
+					'elementor_css_print_method',
+				)
+			),
+			'generated_at'         => current_time( 'mysql' ),
+		);
+	}
+
+	private static function get_directorist_snapshot(): array {
+		$version       = defined( 'DIRECTORIST_VERSION' ) ? DIRECTORIST_VERSION : '';
+		$version       = '' !== $version ? $version : ( defined( 'ATBDP_VERSION' ) ? ATBDP_VERSION : '' );
+		$version       = '' !== $version ? $version : self::get_plugin_version_from_files( array( 'directorist/directorist-base.php', 'directorist/directorist.php' ) );
+		$post_type     = self::first_existing_post_type( array( 'at_biz_dir', 'directorist_listing', 'directory_listing', 'listing', 'listings' ) );
+		$available     = '' !== $version || '' !== $post_type || function_exists( 'directorist' );
+
+		if ( ! $available ) {
+			return array(
+				'available'    => false,
+				'generated_at' => current_time( 'mysql' ),
+			);
+		}
+
+		$category_tax = self::first_existing_taxonomy( array( 'at_biz_dir-category', 'directory_category', 'directorist_category', 'listing_category' ) );
+		$location_tax = self::first_existing_taxonomy( array( 'at_biz_dir-location', 'directory_location', 'directorist_location', 'listing_location' ) );
+		$type_tax     = self::first_existing_taxonomy( array( 'atbdp_listing_types', 'at_biz_dir-type', 'directorist_listing_type', 'directory_type' ) );
+
+		return array(
+			'available'       => $available,
+			'version'         => $version,
+			'listing_post_type' => $post_type,
+			'listing_counts'  => '' !== $post_type ? self::count_post_type_by_status( $post_type ) : array(),
+			'category_taxonomy' => $category_tax,
+			'categories'      => '' !== $category_tax ? self::count_taxonomy_terms( $category_tax ) : 0,
+			'location_taxonomy' => $location_tax,
+			'locations'       => '' !== $location_tax ? self::count_taxonomy_terms( $location_tax ) : 0,
+			'directory_type_taxonomy' => $type_tax,
+			'directory_types' => '' !== $type_tax ? self::count_taxonomy_terms( $type_tax ) : 0,
+			'selected_options' => self::get_existing_options_snapshot(
+				array(
+					'atbdp_option',
+					'atbdp_options',
+					'directorist_options',
+					'directorist_pages',
+					'atbdp_pages',
+					'atbdp_listing_page',
+					'atbdp_search_listing_page',
+					'atbdp_add_listing_page',
+					'atbdp_all_categories_page',
+					'atbdp_all_locations_page',
+				)
+			),
+			'generated_at'    => current_time( 'mysql' ),
+		);
+	}
+
 	private static function get_context_report(): array {
 		return array(
 			'identity'    => array(
@@ -1606,6 +2233,7 @@ final class WP_CLI_Setup_Helper {
 				'GET /cron'        => 'Upcoming and overdue WP-Cron events.',
 				'GET /transients'  => 'Recent transient sample and value sizes.',
 				'GET /debug-log'   => 'Tail of wp-content/debug.log or custom WP_DEBUG_LOG file.',
+				'GET /snapshot'    => 'Bundled read-only debug snapshot with REST health and recent error summary.',
 				'GET /search'      => 'Read-only post/content search.',
 				'POST /ask'        => 'Bundle a debugging question with selected site context.',
 				'GET /commands'    => 'Copy-ready REST, WP-CLI, and SSH command examples.',
@@ -1613,6 +2241,7 @@ final class WP_CLI_Setup_Helper {
 			'workflow'    => array(
 				'Create a temporary Application Password for an admin user.',
 				'Call /health to confirm authentication.',
+				'Call /snapshot for one bundled read-only debug report.',
 				'Call /ask with the issue description, URL, browser console error, or failed request.',
 				'Use /search for relevant pages, templates, listings, or Elementor content.',
 				'Delete the Application Password and remove this plugin when debugging is finished.',
@@ -1839,6 +2468,7 @@ final class WP_CLI_Setup_Helper {
 				'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/cron' ),
 				'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/transients' ),
 				'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/debug-log?lines=200' ),
+				'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/snapshot?lines=300' ),
 				'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/commands' ),
 				'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/context' ),
 				'curl -u "admin_user:APPLICATION_PASSWORD" ' . self::shell_quote( $base . '/search?q=homepage&limit=10' ),
@@ -1935,6 +2565,102 @@ final class WP_CLI_Setup_Helper {
 				'wp --info',
 			)
 		);
+	}
+
+	private static function normalize_lines_limit( int $lines, int $default ): int {
+		if ( $lines < 1 ) {
+			$lines = $default;
+		}
+
+		if ( $lines > 1000 ) {
+			$lines = 1000;
+		}
+
+		return $lines;
+	}
+
+	private static function get_plugin_version_from_files( array $plugin_files ): string {
+		if ( ! function_exists( 'get_plugins' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		$plugins = get_plugins();
+
+		foreach ( $plugin_files as $plugin_file ) {
+			if ( isset( $plugins[ $plugin_file ]['Version'] ) ) {
+				return (string) $plugins[ $plugin_file ]['Version'];
+			}
+		}
+
+		return '';
+	}
+
+	private static function get_options_by_prefix( string $prefix, int $limit ): array {
+		global $wpdb;
+
+		$limit = max( 1, min( 100, $limit ) );
+		$rows  = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s ORDER BY option_name ASC LIMIT %d",
+				$wpdb->esc_like( $prefix ) . '%',
+				$limit
+			),
+			ARRAY_A
+		);
+
+		if ( ! is_array( $rows ) ) {
+			return array();
+		}
+
+		$options = array();
+
+		foreach ( $rows as $row ) {
+			$name             = isset( $row['option_name'] ) ? (string) $row['option_name'] : '';
+			$value            = isset( $row['option_value'] ) ? maybe_unserialize( $row['option_value'] ) : null;
+			$options[ $name ] = self::summarize_option_value( $name, $value );
+		}
+
+		return $options;
+	}
+
+	private static function get_existing_options_snapshot( array $option_names ): array {
+		$options = array();
+
+		foreach ( $option_names as $option_name ) {
+			$value = get_option( $option_name, null );
+
+			if ( null === $value ) {
+				continue;
+			}
+
+			$options[ $option_name ] = self::summarize_option_value( $option_name, $value );
+		}
+
+		return $options;
+	}
+
+	private static function summarize_option_value( string $key, $value ) {
+		$value = self::redact_sensitive_value( $key, $value );
+
+		if ( is_string( $value ) ) {
+			return self::truncate_text( $value, 300 );
+		}
+
+		if ( is_scalar( $value ) || null === $value ) {
+			return $value;
+		}
+
+		return self::summarize_value( $value );
+	}
+
+	private static function truncate_text( $text, int $max_length ): string {
+		$text = is_string( $text ) ? $text : '';
+
+		if ( strlen( $text ) <= $max_length ) {
+			return $text;
+		}
+
+		return substr( $text, 0, max( 0, $max_length - 3 ) ) . '...';
 	}
 
 	private static function function_available( string $function_name ): bool {
