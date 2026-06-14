@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Temporary Site Connector
  * Description: Temporary admin-only WordPress diagnostics connector for remote debugging.
- * Version: 1.4.0
+ * Version: 1.4.1
  * Author: Codex
  * License: GPL-2.0-or-later
  * Requires PHP: 7.2
@@ -21,6 +21,7 @@ final class WP_CLI_Setup_Helper {
 	private const REST_NAMESPACE = 'wp-cli-helper/v1';
 	private const CONNECTOR_PASSWORD_ACTION = 'wp_cli_setup_helper_generate_password';
 	private const DEBUG_ENABLE_ACTION = 'wp_cli_setup_helper_enable_debug';
+	private const DEBUG_DISABLE_ACTION = 'wp_cli_setup_helper_disable_debug';
 	private const OPTION_PASSWORDS = 'wp_cli_setup_helper_passwords';
 	private const OPTION_DEBUG_STATE = 'wp_cli_setup_helper_debug_state';
 
@@ -642,6 +643,18 @@ final class WP_CLI_Setup_Helper {
 			);
 		}
 
+		if ( self::DEBUG_DISABLE_ACTION === $action ) {
+			check_admin_referer( self::DEBUG_DISABLE_ACTION );
+
+			$result = self::disable_debug_logging();
+
+			return array(
+				'type'    => ! empty( $result['ok'] ) ? 'success' : 'error',
+				'message' => isset( $result['message'] ) ? $result['message'] : __( 'Debug logging restore action finished.', 'wp-cli-setup-helper' ),
+				'details' => $result,
+			);
+		}
+
 		return array();
 	}
 
@@ -699,13 +712,16 @@ final class WP_CLI_Setup_Helper {
 
 	private static function render_debug_tools(): void {
 		$status = self::get_debug_config_status();
-		$button_disabled = ! $status['writable'] || $status['active'] || $status['owned'];
+		$button_disabled = ! $status['writable'] || ( $status['active'] && ! $status['owned'] );
+		$action = $status['owned'] ? self::DEBUG_DISABLE_ACTION : self::DEBUG_ENABLE_ACTION;
+		$nonce_action = $status['owned'] ? self::DEBUG_DISABLE_ACTION : self::DEBUG_ENABLE_ACTION;
+		$button_label = $status['owned'] ? __( 'Disable debug logging', 'wp-cli-setup-helper' ) : __( 'Enable debug logging', 'wp-cli-setup-helper' );
 		$status_message = '';
 
 		if ( $status['owned'] ) {
-			$status_message = __( 'Debug logging was enabled by this plugin and will be restored on uninstall.', 'wp-cli-setup-helper' );
+			$status_message = __( 'Debug logging was enabled by this plugin. You can disable it now, or it will be restored on uninstall.', 'wp-cli-setup-helper' );
 		} elseif ( $status['active'] ) {
-			$status_message = __( 'Debug logging is already enabled. This plugin will not change it on uninstall.', 'wp-cli-setup-helper' );
+			$status_message = __( 'Debug logging is already enabled outside this plugin. This connector will not disable it.', 'wp-cli-setup-helper' );
 		}
 		?>
 		<div class="wp-cli-helper-card">
@@ -735,9 +751,9 @@ final class WP_CLI_Setup_Helper {
 				</tbody>
 			</table>
 			<form method="post" action="" class="wp-cli-helper-actions">
-				<input type="hidden" name="wp_cli_helper_action" value="<?php echo esc_attr( self::DEBUG_ENABLE_ACTION ); ?>" />
-				<?php wp_nonce_field( self::DEBUG_ENABLE_ACTION ); ?>
-				<?php submit_button( $status['active'] || $status['owned'] ? __( 'Debug logging enabled', 'wp-cli-setup-helper' ) : __( 'Enable debug logging', 'wp-cli-setup-helper' ), 'secondary', 'submit', false, $button_disabled ? array( 'disabled' => 'disabled' ) : array() ); ?>
+				<input type="hidden" name="wp_cli_helper_action" value="<?php echo esc_attr( $action ); ?>" />
+				<?php wp_nonce_field( $nonce_action ); ?>
+				<?php submit_button( $status['active'] && ! $status['owned'] ? __( 'Debug already enabled', 'wp-cli-setup-helper' ) : $button_label, $status['owned'] ? 'delete' : 'secondary', 'submit', false, $button_disabled ? array( 'disabled' => 'disabled' ) : array() ); ?>
 			</form>
 		</div>
 		<?php
@@ -1044,6 +1060,10 @@ final class WP_CLI_Setup_Helper {
 		);
 	}
 
+	private static function disable_debug_logging(): array {
+		return self::restore_debug_logging( true );
+	}
+
 	private static function find_wp_config_path(): string {
 		$candidates = array(
 			ABSPATH . 'wp-config.php',
@@ -1125,25 +1145,36 @@ final class WP_CLI_Setup_Helper {
 		return preg_replace( $pattern, '', $contents, 1 );
 	}
 
-	private static function restore_debug_logging(): void {
+	private static function restore_debug_logging( bool $clear_option = false ): array {
 		$state = get_option( self::OPTION_DEBUG_STATE, array() );
 
 		if ( ! is_array( $state ) || empty( $state['owned'] ) || empty( $state['constants'] ) || ! is_array( $state['constants'] ) ) {
-			return;
+			return array(
+				'ok'      => true,
+				'message' => __( 'No plugin-owned debug changes were found.', 'wp-cli-setup-helper' ),
+			);
 		}
 
 		$path = ! empty( $state['path'] ) ? (string) $state['path'] : self::find_wp_config_path();
 
 		if ( '' === $path || ! file_exists( $path ) || ! is_readable( $path ) || ! is_writable( $path ) ) {
 			error_log( 'Temporary Site Connector could not restore debug logging because wp-config.php is unavailable or not writable.' );
-			return;
+			return array(
+				'ok'      => false,
+				'message' => __( 'Could not restore debug logging because wp-config.php is unavailable or not writable.', 'wp-cli-setup-helper' ),
+				'path'    => self::normalize_path( $path ),
+			);
 		}
 
 		$contents = file_get_contents( $path );
 
 		if ( false === $contents ) {
 			error_log( 'Temporary Site Connector could not read wp-config.php during uninstall cleanup.' );
-			return;
+			return array(
+				'ok'      => false,
+				'message' => __( 'Could not read wp-config.php while restoring debug logging.', 'wp-cli-setup-helper' ),
+				'path'    => self::normalize_path( $path ),
+			);
 		}
 
 		$updated = $contents;
@@ -1157,8 +1188,26 @@ final class WP_CLI_Setup_Helper {
 		}
 
 		if ( $updated !== $contents ) {
-			file_put_contents( $path, $updated, LOCK_EX );
+			$written = file_put_contents( $path, $updated, LOCK_EX );
+
+			if ( false === $written ) {
+				return array(
+					'ok'      => false,
+					'message' => __( 'Could not write wp-config.php while restoring debug logging.', 'wp-cli-setup-helper' ),
+					'path'    => self::normalize_path( $path ),
+				);
+			}
 		}
+
+		if ( $clear_option ) {
+			delete_option( self::OPTION_DEBUG_STATE );
+		}
+
+		return array(
+			'ok'      => true,
+			'message' => __( 'Debug logging restored to the previous plugin-tracked state.', 'wp-cli-setup-helper' ),
+			'path'    => self::normalize_path( $path ),
+		);
 	}
 
 	private static function get_diagnostics(): array {

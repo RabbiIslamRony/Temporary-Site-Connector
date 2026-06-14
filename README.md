@@ -6,7 +6,7 @@ Temporary authenticated WordPress diagnostics connector for remote debugging.
 
 - Generates temporary Application Password based debug commands for the current admin user.
 - Exposes authenticated, admin-only REST diagnostics endpoints.
-- Can enable temporary debug logging and restore plugin-owned debug changes on uninstall.
+- Can enable or disable temporary debug logging and restore plugin-owned debug changes on uninstall.
 - Tracks only Application Passwords created by this plugin and removes them on uninstall.
 - Stores generated command text in browser session storage so it survives admin page reloads.
 
@@ -23,4 +23,3 @@ Temporary authenticated WordPress diagnostics connector for remote debugging.
 Upload the plugin folder or zip through WordPress Admin, then open:
 
 `Tools > Temporary Site Connector`
-
