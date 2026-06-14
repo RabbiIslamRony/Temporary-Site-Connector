@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Temporary Site Connector
  * Description: Temporary admin-only WordPress diagnostics connector for remote debugging.
- * Version: 1.4.1
+ * Version: 1.4.2
  * Author: Codex
  * License: GPL-2.0-or-later
  * Requires PHP: 7.2
@@ -22,6 +22,7 @@ final class WP_CLI_Setup_Helper {
 	private const CONNECTOR_PASSWORD_ACTION = 'wp_cli_setup_helper_generate_password';
 	private const DEBUG_ENABLE_ACTION = 'wp_cli_setup_helper_enable_debug';
 	private const DEBUG_DISABLE_ACTION = 'wp_cli_setup_helper_disable_debug';
+	private const REVOKE_PASSWORD_ACTION = 'wp_cli_setup_helper_revoke_password';
 	private const OPTION_PASSWORDS = 'wp_cli_setup_helper_passwords';
 	private const OPTION_DEBUG_STATE = 'wp_cli_setup_helper_debug_state';
 
@@ -655,6 +656,19 @@ final class WP_CLI_Setup_Helper {
 			);
 		}
 
+		if ( self::REVOKE_PASSWORD_ACTION === $action ) {
+			check_admin_referer( self::REVOKE_PASSWORD_ACTION );
+
+			$uuid = isset( $_POST['application_password_uuid'] ) ? sanitize_text_field( wp_unslash( $_POST['application_password_uuid'] ) ) : '';
+			$result = self::revoke_tracked_application_password( $uuid );
+
+			return array(
+				'type'    => ! empty( $result['ok'] ) ? 'success' : 'error',
+				'message' => isset( $result['message'] ) ? $result['message'] : __( 'Application Password revoke action finished.', 'wp-cli-setup-helper' ),
+				'details' => $result,
+			);
+		}
+
 		return array();
 	}
 
@@ -779,6 +793,46 @@ final class WP_CLI_Setup_Helper {
 					</tr>
 				</tbody>
 			</table>
+			<?php if ( is_array( $passwords ) && ! empty( $passwords ) ) : ?>
+				<h3><?php echo esc_html__( 'Plugin-created Application Passwords', 'wp-cli-setup-helper' ); ?></h3>
+				<table class="widefat striped wp-cli-helper-table">
+					<thead>
+						<tr>
+							<th><?php echo esc_html__( 'Name', 'wp-cli-setup-helper' ); ?></th>
+							<th><?php echo esc_html__( 'User', 'wp-cli-setup-helper' ); ?></th>
+							<th><?php echo esc_html__( 'Created', 'wp-cli-setup-helper' ); ?></th>
+							<th><?php echo esc_html__( 'UUID', 'wp-cli-setup-helper' ); ?></th>
+							<th><?php echo esc_html__( 'Action', 'wp-cli-setup-helper' ); ?></th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php foreach ( $passwords as $record ) : ?>
+							<?php
+							if ( ! is_array( $record ) || empty( $record['uuid'] ) ) {
+								continue;
+							}
+
+							$user = ! empty( $record['user_id'] ) ? get_userdata( absint( $record['user_id'] ) ) : false;
+							$uuid = (string) $record['uuid'];
+							?>
+							<tr>
+								<td><?php echo esc_html( isset( $record['name'] ) ? (string) $record['name'] : __( 'Connector password', 'wp-cli-setup-helper' ) ); ?></td>
+								<td><?php echo esc_html( $user ? $user->user_login . ' (#' . $user->ID . ')' : '#' . absint( isset( $record['user_id'] ) ? $record['user_id'] : 0 ) ); ?></td>
+								<td><?php echo esc_html( isset( $record['created_at'] ) ? (string) $record['created_at'] : '' ); ?></td>
+								<td><code><?php echo esc_html( substr( $uuid, 0, 8 ) . '...' . substr( $uuid, -8 ) ); ?></code></td>
+								<td>
+									<form method="post" action="">
+										<input type="hidden" name="wp_cli_helper_action" value="<?php echo esc_attr( self::REVOKE_PASSWORD_ACTION ); ?>" />
+										<input type="hidden" name="application_password_uuid" value="<?php echo esc_attr( $uuid ); ?>" />
+										<?php wp_nonce_field( self::REVOKE_PASSWORD_ACTION ); ?>
+										<?php submit_button( __( 'Revoke', 'wp-cli-setup-helper' ), 'delete small', 'submit', false ); ?>
+									</form>
+								</td>
+							</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
+			<?php endif; ?>
 		</div>
 		<?php
 	}
@@ -885,6 +939,42 @@ final class WP_CLI_Setup_Helper {
 
 			WP_Application_Passwords::delete_application_password( absint( $record['user_id'] ), (string) $record['uuid'] );
 		}
+	}
+
+	private static function revoke_tracked_application_password( string $uuid ): array {
+		if ( '' === $uuid ) {
+			return array(
+				'ok'      => false,
+				'message' => __( 'Missing Application Password UUID.', 'wp-cli-setup-helper' ),
+			);
+		}
+
+		$records = get_option( self::OPTION_PASSWORDS, array() );
+
+		if ( ! is_array( $records ) || empty( $records[ $uuid ] ) || ! is_array( $records[ $uuid ] ) ) {
+			return array(
+				'ok'      => false,
+				'message' => __( 'This Application Password is not tracked by this plugin.', 'wp-cli-setup-helper' ),
+			);
+		}
+
+		$record = $records[ $uuid ];
+
+		if ( ! class_exists( 'WP_Application_Passwords' ) ) {
+			require_once ABSPATH . WPINC . '/class-wp-application-passwords.php';
+		}
+
+		if ( method_exists( 'WP_Application_Passwords', 'delete_application_password' ) && ! empty( $record['user_id'] ) ) {
+			WP_Application_Passwords::delete_application_password( absint( $record['user_id'] ), $uuid );
+		}
+
+		unset( $records[ $uuid ] );
+		update_option( self::OPTION_PASSWORDS, $records, false );
+
+		return array(
+			'ok'      => true,
+			'message' => __( 'Application Password revoked and removed from connector tracking.', 'wp-cli-setup-helper' ),
+		);
 	}
 
 	private static function get_connector_commands( string $username, string $password ): string {
