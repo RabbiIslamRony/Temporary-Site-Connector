@@ -26,3 +26,7 @@ Temporary authenticated WordPress diagnostics connector for remote debugging.
 Upload the plugin folder or zip through WordPress Admin, then open:
 
 `Tools > Temporary Site Connector`
+
+## Project context
+
+For architecture, safety rules, endpoints, and the recommended debug workflow, see [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md).
